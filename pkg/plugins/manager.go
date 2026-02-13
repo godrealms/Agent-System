@@ -1,12 +1,14 @@
 package plugins
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"plugin"
 	"sync"
+	"time"
 )
 
 // PluginType represents different types of plugins
@@ -158,63 +160,92 @@ func (pm *PluginManager) ListPlugins() []PluginInfo {
 	return plugins
 }
 
-// ExecutePluginsOfType executes all plugins of a specific type
+// ExecutePluginsOfType executes all plugins of a specific type with better error handling
 func (pm *PluginManager) ExecutePluginsOfType(pluginType PluginType, data interface{}) ([]interface{}, error) {
 	pm.pluginMu.RLock()
 	defer pm.pluginMu.RUnlock()
 
 	var results []interface{}
+	var errors []error
 
-	for _, plugin := range pm.plugins {
+	for name, plugin := range pm.plugins {
 		if plugin.GetType() == pluginType {
-			result, err := plugin.Execute(data)
-			if err != nil {
-				log.Printf("Plugin %s execution failed: %v", plugin.GetName(), err)
-				continue
+			// Add timeout for plugin execution
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			// Execute plugin in separate goroutine to respect timeout
+			resultChan := make(chan interface{}, 1)
+			errorChan := make(chan error, 1)
+
+			go func() {
+				result, err := plugin.Execute(data)
+				if err != nil {
+					errorChan <- fmt.Errorf("plugin %s failed: %w", name, err)
+				} else {
+					resultChan <- result
+				}
+			}()
+
+			select {
+			case result := <-resultChan:
+				results = append(results, result)
+			case err := <-errorChan:
+				errors = append(errors, err)
+				log.Printf("Plugin %s execution failed: %v", name, err)
+			case <-ctx.Done():
+				err := fmt.Errorf("plugin %s timed out after 30 seconds", name)
+				errors = append(errors, err)
+				log.Printf("Plugin %s timed out", name)
 			}
-			results = append(results, result)
+
+			cancel()
 		}
+	}
+
+	// Return results even if some plugins failed
+	if len(errors) > 0 {
+		return results, fmt.Errorf("some plugins failed: %v", errors)
 	}
 
 	return results, nil
 }
 
-// ExecutePreProcessors runs all pre-processor plugins
-func (pm *PluginManager) ExecutePreProcessors(data interface{}) (interface{}, error) {
-	_, err := pm.ExecutePluginsOfType(PluginTypePreProcessor, data)
-	if err != nil {
-		return nil, err
-	}
-
-	// For simplicity, return the original data plus any modifications
-	// In a real implementation, you'd want more sophisticated data merging
-	return data, nil
-}
-
-// ExecutePostProcessors runs all post-processor plugins
-func (pm *PluginManager) ExecutePostProcessors(data interface{}) (interface{}, error) {
-	_, err := pm.ExecutePluginsOfType(PluginTypePostProcessor, data)
-	if err != nil {
-		return nil, err
-	}
-
-	return data, nil
-}
-
-// ExecuteValidators runs all validator plugins
+// ExecuteValidators runs all validator plugins with comprehensive error reporting
 func (pm *PluginManager) ExecuteValidators(data interface{}) (bool, []string) {
 	results, err := pm.ExecutePluginsOfType(PluginTypeValidator, data)
 	if err != nil {
-		return false, []string{err.Error()}
+		return false, []string{fmt.Sprintf("validator execution error: %v", err)}
 	}
 
 	var errors []string
 	allValid := true
 
-	for _, result := range results {
-		if valid, ok := result.(bool); !ok || !valid {
+	for i, result := range results {
+		// Handle different result types
+		switch v := result.(type) {
+		case bool:
+			if !v {
+				allValid = false
+				errors = append(errors, fmt.Sprintf("validator %d returned false", i))
+			}
+		case string:
+			if v != "" {
+				allValid = false
+				errors = append(errors, fmt.Sprintf("validator %d failed: %s", i, v))
+			}
+		case map[string]interface{}:
+			if isValid, ok := v["valid"].(bool); ok && !isValid {
+				allValid = false
+				if errorMsg, ok := v["error"].(string); ok {
+					errors = append(errors, fmt.Sprintf("validator %d: %s", i, errorMsg))
+				} else {
+					errors = append(errors, fmt.Sprintf("validator %d failed", i))
+				}
+			}
+		default:
+			// Assume non-bool results indicate failure
 			allValid = false
-			errors = append(errors, fmt.Sprintf("validation failed: %v", result))
+			errors = append(errors, fmt.Sprintf("validator %d returned unexpected type: %T", i, result))
 		}
 	}
 

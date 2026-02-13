@@ -115,7 +115,7 @@ func (m *Monitor) Stop() error {
 	return nil
 }
 
-// RecordSession records a completed session
+// RecordSession records a completed session with enhanced logging
 func (m *Monitor) RecordSession(sessionID string, success bool, duration time.Duration,
 	featuresCompleted []string, tokensUsed int, err error) {
 
@@ -134,6 +134,10 @@ func (m *Monitor) RecordSession(sessionID string, success bool, duration time.Du
 
 	if err != nil {
 		record.Error = err.Error()
+		log.Printf("🔴 Session %s failed after %v: %v", sessionID, duration, err)
+	} else {
+		log.Printf("🟢 Session %s completed successfully in %v with %d features and %d tokens",
+			sessionID, duration, len(featuresCompleted), tokensUsed)
 	}
 
 	m.metrics.SessionHistory = append(m.metrics.SessionHistory, record)
@@ -157,6 +161,13 @@ func (m *Monitor) RecordSession(sessionID string, success bool, duration time.Du
 			totalDuration += s.Duration
 		}
 		m.metrics.AvgSessionDuration = totalDuration / time.Duration(m.metrics.TotalSessions)
+	}
+
+	// Log performance metrics periodically
+	if m.metrics.TotalSessions%10 == 0 {
+		successRate := float64(m.metrics.SuccessfulSessions) / float64(m.metrics.TotalSessions) * 100
+		log.Printf("📊 Performance Summary: %d total sessions, %.1f%% success rate, avg duration: %v",
+			m.metrics.TotalSessions, successRate, m.metrics.AvgSessionDuration)
 	}
 
 	// Notify subscribers

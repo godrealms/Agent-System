@@ -3,7 +3,6 @@ package performance
 import (
 	"context"
 	"fmt"
-	"log"
 	"runtime"
 	"sync"
 	"time"
@@ -27,6 +26,8 @@ type OptimizationConfig struct {
 	GCThreshold           float64
 	BatchProcessing       bool
 	BatchSize             int
+	SessionTimeout        time.Duration // Add dedicated timeout config
+	RequestTimeout        time.Duration // Add request-level timeout
 }
 
 // PerformanceMetrics tracks performance statistics
@@ -79,8 +80,16 @@ type MemoryMonitor struct {
 	callback    func()
 }
 
-// NewPerformanceOptimizer creates a new performance optimizer
+// NewPerformanceOptimizer creates a new performance optimizer with better defaults
 func NewPerformanceOptimizer(config *OptimizationConfig) *PerformanceOptimizer {
+	// Set reasonable defaults if not configured
+	if config.SessionTimeout == 0 {
+		config.SessionTimeout = 30 * time.Minute
+	}
+	if config.RequestTimeout == 0 {
+		config.RequestTimeout = 5 * time.Minute
+	}
+
 	return &PerformanceOptimizer{
 		config:        config,
 		cache:         NewCacheManager(config.CacheSizeMB),
@@ -115,11 +124,11 @@ func NewMemoryMonitor(limitMB int, threshold float64) *MemoryMonitor {
 	}
 }
 
-// OptimizeContext optimizes a context for performance
+// OptimizeContext optimizes a context with proper timeouts
 func (po *PerformanceOptimizer) OptimizeContext(ctx context.Context) context.Context {
-	// Add timeout based on configuration
-	timeout := time.Duration(po.config.MaxConcurrentSessions) * time.Minute
-	return context.WithTimeout(ctx, timeout)
+	// Use request timeout for individual operations
+	newCtx, _ := context.WithTimeout(ctx, po.config.RequestTimeout)
+	return newCtx
 }
 
 // WithCaching executes a function with caching

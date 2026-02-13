@@ -3,12 +3,13 @@ package harness
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"AI-agent/internal/config"
+	"AI-agent/pkg/agent"
 	"AI-agent/pkg/environment"
 	"AI-agent/pkg/features"
 	"AI-agent/pkg/monitoring"
-	"AI-agent/pkg/plugins"
 	"AI-agent/pkg/testing"
 )
 
@@ -68,35 +69,38 @@ func (h *Harness) InitializeProject(projectType string) error {
 	return nil
 }
 
-// RunSession executes a single agent session with monitoring
+// RunSession executes a single agent session with monitoring and proper error handling
 func (h *Harness) RunSession() (*agent.SessionResult, error) {
 	log.Println("Starting agent session...")
 
 	// Start monitoring if not already running
 	if err := h.monitor.Start(); err != nil {
 		log.Printf("Warning: Failed to start monitoring: %v", err)
+		// Don't fail the session just for monitoring issues
 	}
 
 	// Determine agent type based on project state
-	agentType := agent.CodingAgent // Simplified
+	agentType := agent.CodingAgent // Simplified for now
 
-	// Create agent
+	// Create agent with proper error handling
 	agt, err := agent.NewAgent(agentType, h.config.ProjectDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
-	defer agt.Close()
+	defer func() {
+		agt.Close() // Close without error checking since Close doesn't return error
+	}()
 
 	// Run agent session
 	result, err := agt.Run()
 	if err != nil {
-		// Record failed session
+		// Record failed session with proper error details
 		h.monitor.RecordSession(
-			result.SessionID,
+			"unknown-session", // result might be nil on error
 			false,
-			result.Duration,
-			result.FeaturesDone,
-			0, // tokens used would come from result
+			0,
+			nil,
+			0,
 			err,
 		)
 		return nil, fmt.Errorf("agent session failed: %w", err)
@@ -112,8 +116,15 @@ func (h *Harness) RunSession() (*agent.SessionResult, error) {
 		nil,
 	)
 
-	// Post-session processing (simplified)
-	log.Printf("Session %s completed with %d features", result.SessionID, len(result.FeaturesDone))
+	// Post-session processing with error handling
+	logMessage := fmt.Sprintf("🟢 Session %s completed", result.SessionID)
+	if len(result.FeaturesDone) > 0 {
+		logMessage += fmt.Sprintf(" with %d features", len(result.FeaturesDone))
+	}
+	if result.CommitHash != "" {
+		logMessage += fmt.Sprintf(" (commit: %s)", result.CommitHash)
+	}
+	log.Println(logMessage)
 
 	return result, nil
 }

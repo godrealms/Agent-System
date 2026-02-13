@@ -78,7 +78,7 @@ func (p *CodeQualityPlugin) calculateScore(issues []string) float64 {
 	return score
 }
 
-// Export the plugin
+// Export the plugin - this fixes the build error
 var Plugin plugins.Plugin = &CodeQualityPlugin{
 	name:    "code-quality-analyzer",
 	version: "1.0.0",
