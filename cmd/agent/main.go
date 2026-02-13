@@ -17,6 +17,7 @@ func main() {
 	sessions := flag.Int("sessions", 1, "Number of agent sessions to run")
 	initialize := flag.Bool("init", false, "Initialize a new project")
 	report := flag.Bool("report", false, "Generate project report")
+	monitor := flag.Bool("monitor", false, "Start monitoring dashboard")
 
 	flag.Parse()
 
@@ -51,6 +52,13 @@ func main() {
 		return
 	}
 
+	if *monitor {
+		if err := h.StartMonitoring(); err != nil {
+			log.Fatalf("Failed to start monitoring: %v", err)
+		}
+		return
+	}
+
 	// Run agent sessions
 	fmt.Printf("Running %d agent session(s)...\n", *sessions)
 
@@ -70,6 +78,7 @@ func main() {
 		fmt.Printf("Session %d (%s): %s\n", i+1, result.SessionID, status)
 		fmt.Printf("  Duration: %v\n", result.Duration)
 		fmt.Printf("  Features Done: %v\n", result.FeaturesDone)
+		fmt.Printf("  Tokens Used: %d\n", result.TokenUsage.TotalTokens)
 		if result.CommitHash != "" {
 			fmt.Printf("  Commit: %s\n", result.CommitHash)
 		}
