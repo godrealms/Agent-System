@@ -78,8 +78,13 @@ func (p *CodeQualityPlugin) calculateScore(issues []string) float64 {
 	return score
 }
 
-// Export the plugin - this fixes the build error
+// Plugin exports the plugin instance for use as a Go plugin (.so)
 var Plugin plugins.Plugin = &CodeQualityPlugin{
 	name:    "code-quality-analyzer",
 	version: "1.0.0",
+}
+
+func main() {
+	// Entry point when built as a standalone binary (not a .so plugin)
+	fmt.Println("CodeQualityPlugin v1.0.0 — build with -buildmode=plugin to use as a plugin")
 }

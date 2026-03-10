@@ -9,7 +9,7 @@ import (
 // Config holds the configuration for the long-running agent system
 type Config struct {
 	// API Keys
-	OpenAIKey string
+	AnthropicKey string
 
 	// Project settings
 	ProjectDir     string
@@ -48,9 +48,9 @@ type Config struct {
 // LoadConfig loads configuration from environment variables and defaults
 func LoadConfig(projectDir string) *Config {
 	return &Config{
-		OpenAIKey:             os.Getenv("OPENAI_API_KEY"),
+		AnthropicKey:          os.Getenv("ANTHROPIC_API_KEY"),
 		ProjectDir:            projectDir,
-		MaxContextSize:        128000, // Claude Opus context window
+		MaxContextSize:        200000, // Claude Opus 4.6 context window
 		SessionTimeout:        30,     // 30 minutes
 		GitEnabled:            true,
 		GitRemote:             "",
