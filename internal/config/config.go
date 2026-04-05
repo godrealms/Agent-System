@@ -6,33 +6,78 @@ import (
 	"strconv"
 )
 
-// Config holds the configuration for the long-running agent system
+// Config holds the configuration for the long-running agent system.
 type Config struct {
-	// API Keys
-	AnthropicKey string
+	// --- Provider selection ---
+	// DefaultProvider selects which LLM backend to use.
+	// Values: claude | openai | kimi | minimax | openrouter | groq |
+	//         gemini | huggingface | fireworks | cloudflare
+	// Defaults to "claude" when empty.
+	DefaultProvider string
 
-	// Project settings
+	// --- Anthropic / Claude ---
+	AnthropicKey   string
+	AnthropicModel string // default: claude-opus-4-6
+
+	// --- OpenAI (ChatGPT) ---
+	OpenAIKey   string
+	OpenAIModel string // default: gpt-4o
+
+	// --- Kimi (Moonshot AI) ---
+	KimiKey   string
+	KimiModel string // default: moonshot-v1-8k
+
+	// --- MINIMAX ---
+	MiniMaxKey   string
+	MiniMaxModel string // default: MiniMax-Text-01
+
+	// --- OpenRouter ---
+	OpenRouterKey   string
+	OpenRouterModel string // default: openai/gpt-4o
+
+	// --- GroqCloud ---
+	GroqKey   string
+	GroqModel string // default: llama-3.3-70b-versatile
+
+	// --- Google Gemini ---
+	GeminiKey   string
+	GeminiModel string // default: gemini-2.0-flash
+
+	// --- Hugging Face Inference Providers ---
+	HuggingFaceKey   string
+	HuggingFaceModel string // default: meta-llama/Llama-3.3-70B-Instruct
+
+	// --- Fireworks AI ---
+	FireworksKey   string
+	FireworksModel string // default: accounts/fireworks/models/llama-v3p3-70b-instruct
+
+	// --- Cloudflare Workers AI ---
+	CloudflareKey       string
+	CloudflareAccountID string
+	CloudflareModel     string // default: @cf/meta/llama-3.1-8b-instruct
+
+	// --- Project settings ---
 	ProjectDir     string
 	MaxContextSize int
 	SessionTimeout int // in minutes
 
-	// Git settings
+	// --- Git settings ---
 	GitEnabled bool
 	GitRemote  string
 
-	// Progress tracking
+	// --- Progress tracking ---
 	ProgressFile string
 	FeatureFile  string
 
-	// Testing
+	// --- Testing ---
 	TestEnabled bool
-	BrowserTool string // puppeteer, selenium, etc.
+	BrowserTool string
 
-	// Monitoring
+	// --- Monitoring ---
 	MonitoringEnabled bool
 	MonitoringPort    int
 
-	// Performance
+	// --- Performance ---
 	MaxConcurrentSessions int
 	CacheEnabled          bool
 	CacheSizeMB           int
@@ -41,25 +86,75 @@ type Config struct {
 	BatchProcessing       bool
 	BatchSize             int
 
-	// Plugins
+	// --- Plugins ---
 	PluginDir string
 }
 
-// LoadConfig loads configuration from environment variables and defaults
+// LoadConfig loads configuration from environment variables with sensible defaults.
 func LoadConfig(projectDir string) *Config {
 	return &Config{
-		AnthropicKey:          os.Getenv("ANTHROPIC_API_KEY"),
-		ProjectDir:            projectDir,
-		MaxContextSize:        200000, // Claude Opus 4.6 context window
-		SessionTimeout:        30,     // 30 minutes
-		GitEnabled:            true,
-		GitRemote:             "",
-		ProgressFile:          filepath.Join(projectDir, "claude-progress.txt"),
-		FeatureFile:           filepath.Join(projectDir, "feature_list.json"),
-		TestEnabled:           true,
-		BrowserTool:           "puppeteer",
-		MonitoringEnabled:     true,
-		MonitoringPort:        8080,
+		// Provider selection
+		DefaultProvider: getEnv("LLM_PROVIDER", "claude"),
+
+		// Anthropic
+		AnthropicKey:   os.Getenv("ANTHROPIC_API_KEY"),
+		AnthropicModel: getEnv("ANTHROPIC_MODEL", "claude-opus-4-6"),
+
+		// OpenAI
+		OpenAIKey:   os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel: getEnv("OPENAI_MODEL", "gpt-4o"),
+
+		// Kimi
+		KimiKey:   os.Getenv("KIMI_API_KEY"),
+		KimiModel: getEnv("KIMI_MODEL", "moonshot-v1-8k"),
+
+		// MINIMAX
+		MiniMaxKey:   os.Getenv("MINIMAX_API_KEY"),
+		MiniMaxModel: getEnv("MINIMAX_MODEL", "MiniMax-Text-01"),
+
+		// OpenRouter
+		OpenRouterKey:   os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterModel: getEnv("OPENROUTER_MODEL", "openai/gpt-4o"),
+
+		// Groq
+		GroqKey:   os.Getenv("GROQ_API_KEY"),
+		GroqModel: getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+
+		// Gemini
+		GeminiKey:   os.Getenv("GEMINI_API_KEY"),
+		GeminiModel: getEnv("GEMINI_MODEL", "gemini-2.0-flash"),
+
+		// HuggingFace
+		HuggingFaceKey:   os.Getenv("HUGGINGFACE_API_KEY"),
+		HuggingFaceModel: getEnv("HUGGINGFACE_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
+
+		// Fireworks
+		FireworksKey:   os.Getenv("FIREWORKS_API_KEY"),
+		FireworksModel: getEnv("FIREWORKS_MODEL", "accounts/fireworks/models/llama-v3p3-70b-instruct"),
+
+		// Cloudflare
+		CloudflareKey:       os.Getenv("CLOUDFLARE_API_KEY"),
+		CloudflareAccountID: os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
+		CloudflareModel:     getEnv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct"),
+
+		// Project
+		ProjectDir:     projectDir,
+		MaxContextSize: 200000,
+		SessionTimeout: 30,
+		GitEnabled:     true,
+		GitRemote:      "",
+		ProgressFile:   filepath.Join(projectDir, "claude-progress.txt"),
+		FeatureFile:    filepath.Join(projectDir, "feature_list.json"),
+
+		// Testing
+		TestEnabled: true,
+		BrowserTool: "puppeteer",
+
+		// Monitoring
+		MonitoringEnabled: true,
+		MonitoringPort:    8080,
+
+		// Performance
 		MaxConcurrentSessions: getIntEnv("MAX_CONCURRENT_SESSIONS", 1),
 		CacheEnabled:          getBoolEnv("CACHE_ENABLED", true),
 		CacheSizeMB:           getIntEnv("CACHE_SIZE_MB", 100),
@@ -67,11 +162,19 @@ func LoadConfig(projectDir string) *Config {
 		GCThreshold:           getFloatEnv("GC_THRESHOLD", 0.8),
 		BatchProcessing:       getBoolEnv("BATCH_PROCESSING", false),
 		BatchSize:             getIntEnv("BATCH_SIZE", 10),
-		PluginDir:             filepath.Join(projectDir, "plugins"),
+
+		// Plugins
+		PluginDir: filepath.Join(projectDir, "plugins"),
 	}
 }
 
-// Helper functions for environment variables
+func getEnv(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
 func getIntEnv(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
