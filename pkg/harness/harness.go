@@ -10,6 +10,7 @@ import (
 	"AI-agent/pkg/environment"
 	"AI-agent/pkg/features"
 	"AI-agent/pkg/monitoring"
+	"AI-agent/pkg/providers"
 	"AI-agent/pkg/testing"
 )
 
@@ -80,10 +81,16 @@ func (h *Harness) RunSession() (*agent.SessionResult, error) {
 	}
 
 	// Determine agent type based on project state
-	agentType := agent.CodingAgent // Simplified for now
+	agentType := agent.CodingAgent
 
-	// Create agent with proper error handling
-	agt, err := agent.NewAgent(agentType, h.config.ProjectDir)
+	// Create provider from config
+	provider, err := providers.New(h.config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	// Create agent
+	agt, err := agent.NewAgent(agentType, h.config.ProjectDir, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}

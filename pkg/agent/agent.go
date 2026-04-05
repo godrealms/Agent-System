@@ -11,11 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	"AI-agent/pkg/providers"
 )
 
-// AgentType identifies the role of the agent
+// AgentType identifies the role of the agent.
 type AgentType string
 
 const (
@@ -23,7 +22,7 @@ const (
 	CodingAgent      AgentType = "coding"
 )
 
-// SessionResult holds the outcome of one agent session
+// SessionResult holds the outcome of one agent session.
 type SessionResult struct {
 	SessionID    string
 	Success      bool
@@ -31,57 +30,43 @@ type SessionResult struct {
 	FeaturesDone []string
 	CommitHash   string
 	Duration     time.Duration
-	TokenUsage   TokenUsage
+	TokenUsage   providers.TokenUsage
 }
 
-// TokenUsage tracks token consumption
-type TokenUsage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-}
-
-// Agent wraps a Claude client with project context
+// Agent drives a single session using any Provider.
 type Agent struct {
 	Type       AgentType
 	projectDir string
-	client     anthropic.Client
+	provider   providers.Provider
 	ctx        context.Context
 	cancel     context.CancelFunc
 }
 
-// NewAgent creates an agent; ANTHROPIC_API_KEY must be set
-func NewAgent(agentType AgentType, projectDir string) (*Agent, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is required")
-	}
-
+// NewAgent creates an Agent that uses the given provider.
+func NewAgent(agentType AgentType, projectDir string, provider providers.Provider) (*Agent, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
-
 	return &Agent{
 		Type:       agentType,
 		projectDir: projectDir,
-		client:     client,
+		provider:   provider,
 		ctx:        ctx,
 		cancel:     cancel,
 	}, nil
 }
 
-// Run executes a full agent session and returns the result
+// Run executes a full agent session and returns the result.
 func (a *Agent) Run() (*SessionResult, error) {
 	defer a.cancel()
 
 	startTime := time.Now()
 	sessionID := fmt.Sprintf("session-%d", startTime.Unix())
 
-	log.Printf("[%s] Starting %s session", sessionID, a.Type)
+	log.Printf("[%s] Starting %s session (provider: %s)", sessionID, a.Type, a.provider.ProviderType())
 
 	var (
 		featuresDone []string
 		commitHash   string
-		totalUsage   TokenUsage
+		totalUsage   providers.TokenUsage
 		runErr       error
 	)
 
@@ -114,58 +99,54 @@ func (a *Agent) Run() (*SessionResult, error) {
 	}, nil
 }
 
-// Close cancels the agent context
-func (a *Agent) Close() {
-	a.cancel()
-}
+// Close cancels the session context.
+func (a *Agent) Close() { a.cancel() }
 
 // ---------------------------------------------------------------------------
 // Initializer agent
 // ---------------------------------------------------------------------------
 
-func (a *Agent) runInitializer(sessionID string) (string, TokenUsage, error) {
-	systemPrompt := fmt.Sprintf(`You are a project initializer agent. Your task is to set up a new software project in the directory: %s
+func (a *Agent) runInitializer(sessionID string) (string, providers.TokenUsage, error) {
+	system := fmt.Sprintf(`You are a project initializer agent. Set up a new software project in: %s
 
-Use the available tools to initialize the project:
+Use the available tools to:
 1. Create a README.md describing the project
 2. Set up the project directory structure
 3. Create an init.sh script to start the development server
 
-Be concise and create only essential files.`, a.projectDir)
+Be concise — create only essential files.`, a.projectDir)
 
-	_, usage, err := a.runAgenticLoop(sessionID, systemPrompt, "Set up this project directory with a good structure and initial files.")
+	_, usage, err := a.runAgenticLoop(sessionID, system,
+		"Set up this project directory with a good structure and initial files.")
 	if err != nil {
 		return "", usage, err
 	}
-
-	commitHash := a.tryGitCommit("Initial project setup by AI agent")
-	return commitHash, usage, nil
+	return a.tryGitCommit("Initial project setup by AI agent"), usage, nil
 }
 
 // ---------------------------------------------------------------------------
 // Coding agent
 // ---------------------------------------------------------------------------
 
-func (a *Agent) runCoding(sessionID string) ([]string, string, TokenUsage, error) {
+func (a *Agent) runCoding(sessionID string) ([]string, string, providers.TokenUsage, error) {
 	featureList, err := a.readFeatureList()
 	if err != nil {
 		log.Printf("[%s] Warning: could not read feature list: %v", sessionID, err)
 		featureList = "No feature list found. Please explore the project and implement improvements."
 	}
-
 	progress, err := a.readProgress()
 	if err != nil {
 		progress = "No progress file found."
 	}
 
-	systemPrompt := fmt.Sprintf(`You are a coding agent working on a software project located at: %s
+	system := fmt.Sprintf(`You are a coding agent working on a software project at: %s
 
-Your job is to implement features from the feature list. For each session:
-1. Read the feature list and progress file to understand the current state
-2. Pick ONE pending feature to implement (the highest priority one)
-3. Implement it fully, including tests if applicable
-4. Update the feature status in feature_list.json to mark it as complete
-5. Record your progress using append_progress
+Each session you must:
+1. Read the feature list and progress to understand current state
+2. Pick ONE pending feature (highest priority)
+3. Implement it fully, including tests where applicable
+4. Mark it complete via update_feature_status
+5. Record progress via append_progress
 
 Current feature list:
 %s
@@ -173,91 +154,74 @@ Current feature list:
 Current progress:
 %s
 
-Be focused: implement one feature at a time.`, a.projectDir, featureList, progress)
+Be focused: one feature per session.`, a.projectDir, featureList, progress)
 
-	_, usage, err := a.runAgenticLoop(sessionID, systemPrompt, "Please implement the next pending feature from the feature list.")
+	_, usage, err := a.runAgenticLoop(sessionID, system,
+		"Please implement the next pending feature from the feature list.")
 	if err != nil {
 		return nil, "", usage, err
 	}
 
 	featuresDone := a.detectCompletedFeatures()
-
 	commitHash := ""
 	if len(featuresDone) > 0 {
-		msg := fmt.Sprintf("feat: implement %s", strings.Join(featuresDone, ", "))
-		commitHash = a.tryGitCommit(msg)
+		commitHash = a.tryGitCommit(fmt.Sprintf("feat: implement %s", strings.Join(featuresDone, ", ")))
 	}
-
 	return featuresDone, commitHash, usage, nil
 }
 
 // ---------------------------------------------------------------------------
-// Agentic loop with tool use
+// Provider-agnostic agentic loop
 // ---------------------------------------------------------------------------
 
-func (a *Agent) runAgenticLoop(sessionID, system, userMessage string) ([]anthropic.MessageParam, TokenUsage, error) {
+func (a *Agent) runAgenticLoop(sessionID, system, userMessage string) ([]providers.Message, providers.TokenUsage, error) {
 	tools := a.buildTools()
-	messages := []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock(userMessage)),
+	messages := []providers.Message{
+		{Role: providers.RoleUser, Content: userMessage},
 	}
 
-	var totalUsage TokenUsage
-	maxIterations := 20
-
-	// adaptive thinking (recommended for Opus 4.6)
-	adaptiveParam := anthropic.NewThinkingConfigAdaptiveParam()
-	thinking := anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptiveParam}
+	var totalUsage providers.TokenUsage
+	const maxIterations = 20
 
 	for i := 0; i < maxIterations; i++ {
 		log.Printf("[%s] Iteration %d/%d", sessionID, i+1, maxIterations)
 
-		stream := a.client.Messages.NewStreaming(a.ctx, anthropic.MessageNewParams{
-			Model:     anthropic.ModelClaudeOpus4_6,
-			MaxTokens: 8192,
-			System: []anthropic.TextBlockParam{
-				{Text: system},
-			},
-			Tools:    tools,
-			Messages: messages,
-			Thinking: thinking,
+		resp, err := a.provider.Chat(a.ctx, system, messages, tools)
+		if err != nil {
+			return messages, totalUsage, fmt.Errorf("provider chat: %w", err)
+		}
+
+		totalUsage.PromptTokens += resp.Usage.PromptTokens
+		totalUsage.CompletionTokens += resp.Usage.CompletionTokens
+		totalUsage.TotalTokens += resp.Usage.TotalTokens
+
+		// Append assistant turn.
+		messages = append(messages, providers.Message{
+			Role:      providers.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
 		})
 
-		// Accumulate the full streamed response
-		var response anthropic.Message
-		for stream.Next() {
-			if err := response.Accumulate(stream.Current()); err != nil {
-				return messages, totalUsage, fmt.Errorf("accumulate error: %w", err)
-			}
-		}
-		if err := stream.Err(); err != nil {
-			return messages, totalUsage, fmt.Errorf("streaming error: %w", err)
-		}
-
-		totalUsage.PromptTokens += int(response.Usage.InputTokens)
-		totalUsage.CompletionTokens += int(response.Usage.OutputTokens)
-		totalUsage.TotalTokens += int(response.Usage.InputTokens) + int(response.Usage.OutputTokens)
-
-		// Convert response content blocks to param blocks
-		contentParams := make([]anthropic.ContentBlockParamUnion, len(response.Content))
-		for j, b := range response.Content {
-			contentParams[j] = b.ToParam()
-		}
-		messages = append(messages, anthropic.NewAssistantMessage(contentParams...))
-
-		log.Printf("[%s] Stop reason: %s", sessionID, response.StopReason)
-
-		if response.StopReason == anthropic.StopReasonEndTurn {
+		if len(resp.ToolCalls) == 0 {
+			log.Printf("[%s] Agent done (no tool calls)", sessionID)
 			break
 		}
 
-		if response.StopReason == anthropic.StopReasonToolUse {
-			toolResults := a.executeTools(sessionID, response.Content)
-			messages = append(messages, anthropic.NewUserMessage(toolResults...))
-			continue
+		// Execute tools and append results.
+		for _, tc := range resp.ToolCalls {
+			log.Printf("[%s] Tool: %s", sessionID, tc.Name)
+			output, isError := a.dispatchTool(tc.Name, tc.Arguments)
+			content := output
+			if isError {
+				content = "ERROR: " + output
+			}
+			messages = append(messages, providers.Message{
+				Role:       providers.RoleTool,
+				Content:    content,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+			})
 		}
-
-		// max_tokens or stop_sequence — exit
-		break
 	}
 
 	return messages, totalUsage, nil
@@ -267,30 +231,23 @@ func (a *Agent) runAgenticLoop(sessionID, system, userMessage string) ([]anthrop
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-func (a *Agent) buildTools() []anthropic.ToolUnionParam {
-	tool := func(name, desc string, props map[string]interface{}, required []string) anthropic.ToolUnionParam {
-		t := anthropic.ToolParam{
-			Name:        name,
-			Description: anthropic.String(desc),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: props,
-				Required:   required,
-			},
-		}
-		return anthropic.ToolUnionParam{OfTool: &t}
-	}
-
-	return []anthropic.ToolUnionParam{
-		tool("read_file", "Read the contents of a file in the project directory",
-			map[string]interface{}{
+func (a *Agent) buildTools() []providers.ToolDef {
+	return []providers.ToolDef{
+		{
+			Name:        "read_file",
+			Description: "Read the contents of a file in the project directory",
+			Properties: map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Relative path from project root",
 				},
-			}, []string{"path"}),
-
-		tool("write_file", "Write content to a file, creating directories as needed",
-			map[string]interface{}{
+			},
+			Required: []string{"path"},
+		},
+		{
+			Name:        "write_file",
+			Description: "Write content to a file, creating directories as needed",
+			Properties: map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Relative path from project root",
@@ -299,39 +256,53 @@ func (a *Agent) buildTools() []anthropic.ToolUnionParam {
 					"type":        "string",
 					"description": "File content to write",
 				},
-			}, []string{"path", "content"}),
-
-		tool("list_files", "List files and directories at the given path",
-			map[string]interface{}{
+			},
+			Required: []string{"path", "content"},
+		},
+		{
+			Name:        "list_files",
+			Description: "List files and directories at a path",
+			Properties: map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Relative path from project root (use '.' for root)",
 				},
-			}, []string{"path"}),
-
-		tool("run_command", "Run a shell command in the project directory and return combined stdout+stderr",
-			map[string]interface{}{
+			},
+			Required: []string{"path"},
+		},
+		{
+			Name:        "run_command",
+			Description: "Run a shell command in the project directory and return combined stdout+stderr",
+			Properties: map[string]interface{}{
 				"command": map[string]interface{}{
 					"type":        "string",
 					"description": "Shell command to execute",
 				},
-			}, []string{"command"}),
-
-		tool("update_feature_status", "Mark a feature as complete in feature_list.json",
-			map[string]interface{}{
+			},
+			Required: []string{"command"},
+		},
+		{
+			Name:        "update_feature_status",
+			Description: "Mark a feature as complete in feature_list.json",
+			Properties: map[string]interface{}{
 				"feature_id": map[string]interface{}{
 					"type":        "string",
 					"description": "The feature ID to mark as complete",
 				},
-			}, []string{"feature_id"}),
-
-		tool("append_progress", "Append a timestamped message to the progress tracking file",
-			map[string]interface{}{
+			},
+			Required: []string{"feature_id"},
+		},
+		{
+			Name:        "append_progress",
+			Description: "Append a timestamped message to the progress tracking file",
+			Properties: map[string]interface{}{
 				"message": map[string]interface{}{
 					"type":        "string",
 					"description": "Progress note to append",
 				},
-			}, []string{"message"}),
+			},
+			Required: []string{"message"},
+		},
 	}
 }
 
@@ -339,29 +310,11 @@ func (a *Agent) buildTools() []anthropic.ToolUnionParam {
 // Tool execution
 // ---------------------------------------------------------------------------
 
-func (a *Agent) executeTools(sessionID string, content []anthropic.ContentBlockUnion) []anthropic.ContentBlockParamUnion {
-	var results []anthropic.ContentBlockParamUnion
-
-	for _, block := range content {
-		toolUse, ok := block.AsAny().(anthropic.ToolUseBlock)
-		if !ok {
-			continue
-		}
-
-		log.Printf("[%s] Tool call: %s", sessionID, toolUse.Name)
-		output, isError := a.dispatchTool(toolUse.Name, toolUse.Input)
-		results = append(results, anthropic.NewToolResultBlock(toolUse.ID, output, isError))
-	}
-
-	return results
-}
-
 func (a *Agent) dispatchTool(name string, rawInput json.RawMessage) (string, bool) {
 	var input map[string]interface{}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return fmt.Sprintf("failed to parse tool input: %v", err), true
 	}
-
 	switch name {
 	case "read_file":
 		return a.toolReadFile(input)
@@ -382,9 +335,7 @@ func (a *Agent) dispatchTool(name string, rawInput json.RawMessage) (string, boo
 
 func (a *Agent) toolReadFile(input map[string]interface{}) (string, bool) {
 	path, _ := input["path"].(string)
-	absPath := filepath.Join(a.projectDir, filepath.Clean(path))
-
-	data, err := os.ReadFile(absPath)
+	data, err := os.ReadFile(filepath.Join(a.projectDir, filepath.Clean(path)))
 	if err != nil {
 		return fmt.Sprintf("error reading file: %v", err), true
 	}
@@ -394,7 +345,6 @@ func (a *Agent) toolReadFile(input map[string]interface{}) (string, bool) {
 func (a *Agent) toolWriteFile(input map[string]interface{}) (string, bool) {
 	path, _ := input["path"].(string)
 	content, _ := input["content"].(string)
-
 	absPath := filepath.Join(a.projectDir, filepath.Clean(path))
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return fmt.Sprintf("error creating directories: %v", err), true
@@ -407,13 +357,10 @@ func (a *Agent) toolWriteFile(input map[string]interface{}) (string, bool) {
 
 func (a *Agent) toolListFiles(input map[string]interface{}) (string, bool) {
 	path, _ := input["path"].(string)
-	absPath := filepath.Join(a.projectDir, filepath.Clean(path))
-
-	entries, err := os.ReadDir(absPath)
+	entries, err := os.ReadDir(filepath.Join(a.projectDir, filepath.Clean(path)))
 	if err != nil {
 		return fmt.Sprintf("error listing directory: %v", err), true
 	}
-
 	var lines []string
 	for _, e := range entries {
 		kind := "file"
@@ -427,75 +374,60 @@ func (a *Agent) toolListFiles(input map[string]interface{}) (string, bool) {
 
 func (a *Agent) toolRunCommand(input map[string]interface{}) (string, bool) {
 	command, _ := input["command"].(string)
-
 	cmd := exec.CommandContext(a.ctx, "sh", "-c", command)
 	cmd.Dir = a.projectDir
 	out, err := cmd.CombinedOutput()
-
-	result := string(out)
 	if err != nil {
-		return fmt.Sprintf("command failed (%v):\n%s", err, result), true
+		return fmt.Sprintf("command failed (%v):\n%s", err, out), true
 	}
-	return result, false
+	return string(out), false
 }
 
 func (a *Agent) toolUpdateFeatureStatus(input map[string]interface{}) (string, bool) {
 	featureID, _ := input["feature_id"].(string)
-
 	featureFile := filepath.Join(a.projectDir, "feature_list.json")
 	data, err := os.ReadFile(featureFile)
 	if err != nil {
 		return fmt.Sprintf("could not read feature_list.json: %v", err), true
 	}
-
-	var featureList map[string]interface{}
-	if err := json.Unmarshal(data, &featureList); err != nil {
+	var fl map[string]interface{}
+	if err := json.Unmarshal(data, &fl); err != nil {
 		return fmt.Sprintf("could not parse feature_list.json: %v", err), true
 	}
-
-	features, _ := featureList["features"].([]interface{})
+	features, _ := fl["features"].([]interface{})
 	found := false
 	for _, f := range features {
 		feature, ok := f.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if feature["id"] == featureID {
+		if ok && feature["id"] == featureID {
 			feature["passes"] = true
 			feature["completed_at"] = time.Now().Format(time.RFC3339)
 			found = true
 		}
 	}
-
 	if !found {
 		return fmt.Sprintf("feature %q not found", featureID), true
 	}
-
-	updated, err := json.MarshalIndent(featureList, "", "  ")
+	updated, err := json.MarshalIndent(fl, "", "  ")
 	if err != nil {
-		return fmt.Sprintf("could not marshal feature list: %v", err), true
+		return fmt.Sprintf("marshal: %v", err), true
 	}
 	if err := os.WriteFile(featureFile, updated, 0644); err != nil {
-		return fmt.Sprintf("could not write feature_list.json: %v", err), true
+		return fmt.Sprintf("write: %v", err), true
 	}
-
 	return fmt.Sprintf("feature %q marked as complete", featureID), false
 }
 
 func (a *Agent) toolAppendProgress(input map[string]interface{}) (string, bool) {
 	message, _ := input["message"].(string)
-
 	progressFile := filepath.Join(a.projectDir, "claude-progress.txt")
-	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), message)
-
 	f, err := os.OpenFile(progressFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Sprintf("could not open progress file: %v", err), true
+		return fmt.Sprintf("open progress file: %v", err), true
 	}
 	defer f.Close()
-
+	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), message)
 	if _, err := f.WriteString(line); err != nil {
-		return fmt.Sprintf("could not write to progress file: %v", err), true
+		return fmt.Sprintf("write progress: %v", err), true
 	}
 	return "progress recorded", false
 }
@@ -506,18 +438,12 @@ func (a *Agent) toolAppendProgress(input map[string]interface{}) (string, bool) 
 
 func (a *Agent) readFeatureList() (string, error) {
 	data, err := os.ReadFile(filepath.Join(a.projectDir, "feature_list.json"))
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+	return string(data), err
 }
 
 func (a *Agent) readProgress() (string, error) {
 	data, err := os.ReadFile(filepath.Join(a.projectDir, "claude-progress.txt"))
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+	return string(data), err
 }
 
 func (a *Agent) detectCompletedFeatures() []string {
@@ -525,22 +451,18 @@ func (a *Agent) detectCompletedFeatures() []string {
 	if err != nil {
 		return nil
 	}
-
 	var fl map[string]interface{}
 	if err := json.Unmarshal(data, &fl); err != nil {
 		return nil
 	}
-
-	features, _ := fl["features"].([]interface{})
 	var done []string
-	for _, f := range features {
+	for _, f := range fl["features"].([]interface{}) {
 		feature, ok := f.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if passes, _ := feature["passes"].(bool); passes {
-			if id, _ := feature["id"].(string); id != "" {
-				done = append(done, id)
+		if ok {
+			if passes, _ := feature["passes"].(bool); passes {
+				if id, _ := feature["id"].(string); id != "" {
+					done = append(done, id)
+				}
 			}
 		}
 	}
@@ -554,15 +476,12 @@ func (a *Agent) tryGitCommit(message string) string {
 		log.Printf("git add failed: %v", err)
 		return ""
 	}
-
 	commitCmd := exec.Command("git", "commit", "-m", message)
 	commitCmd.Dir = a.projectDir
-	out, err := commitCmd.CombinedOutput()
-	if err != nil {
+	if out, err := commitCmd.CombinedOutput(); err != nil {
 		log.Printf("git commit failed: %v\n%s", err, out)
 		return ""
 	}
-
 	hashCmd := exec.Command("git", "rev-parse", "--short", "HEAD")
 	hashCmd.Dir = a.projectDir
 	hashOut, err := hashCmd.Output()
